@@ -1731,8 +1731,7 @@ def get_head_commit_hash():
         with open(file=os.environ["GITHUB_EVENT_PATH"]) as github_event_file:
             commit_hash = json.load(github_event_file)["pull_request"]["head"]["sha"]
     else:
-        repository = git.Repo(path=os.environ["GITHUB_WORKSPACE"])
-        commit_hash = repository.git.rev_parse("HEAD")
+        commit_hash = os.environ["GITHUB_SHA"]
 
     return commit_hash
 
