@@ -1592,7 +1592,7 @@ def test_compile_sketch(capsys, mocker, clean_build_cache, returncode, expected_
         + "::endgroup::"
     )
     if not expected_success:
-        expected_stdout += "\n::error::Compilation failed"
+        expected_stdout += f"\n::error::Compilation failed for {str(compilesketches.path_relative_to_workspace(path=sketch_path))}"
     else:
         expected_stdout += "\nCompilation time elapsed: 0s"
     assert capsys.readouterr().out.strip() == expected_stdout
