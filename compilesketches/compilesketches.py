@@ -1,4 +1,5 @@
 import atexit
+import concurrent.futures
 import time
 import contextlib
 import enum
@@ -232,19 +233,25 @@ class CompileSketches:
 
         # Compile all sketches under the paths specified by the sketch-paths input
         all_compilations_successful = True
-        sketch_report_list = []
 
         sketch_list = self.find_sketches()
+
+        # Compile all sketches in parallel; each uses its own --build-path so there is no shared cache to clean
+        compile_results = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=os.cpu_count()) as pool:
+            futures = {
+                pool.submit(self.compile_sketch, sketch_path=sketch): sketch
+                for sketch in sketch_list
+            }
+            for future in concurrent.futures.as_completed(futures):
+                compile_results[futures[future]] = future.result()
+
+        # Build the report list in the original sketch order
+        sketch_report_list = []
         for sketch in sketch_list:
-            # It's necessary to clear the cache between each compilation to get a true compiler warning count, otherwise
-            # only the first sketch compilation's warning count would reflect warnings from cached code
-            compilation_result = self.compile_sketch(
-                sketch_path=sketch, clean_build_cache=self.enable_warnings_report or self.enable_issues_report
-            )
+            compilation_result = compile_results[sketch]
             if not compilation_result.success:
                 all_compilations_successful = False
-
-            # Store the size data for this sketch
             sketch_report_list.append(self.get_sketch_report(compilation_result=compilation_result))
 
         sketches_report = self.get_sketches_report(sketch_report_list=sketch_report_list)
@@ -921,7 +928,7 @@ class CompileSketches:
 
         return sketch_list
 
-    def compile_sketch(self, sketch_path, clean_build_cache):
+    def compile_sketch(self, sketch_path):
         """Compile the specified sketch and returns an object containing the result:
         sketch -- the sketch path relative to the workspace
         success -- the success of the compilation (True, False)
@@ -929,16 +936,17 @@ class CompileSketches:
 
         Keyword arguments:
         sketch_path -- path of the sketch to compile
-        clean_build_cache -- whether to delete cached compiled from previous compilations before compiling
         """
-        compilation_command = ["compile", "--warnings", "all", "--fqbn", self.fqbn]
+        build_path = pathlib.Path("/tmp/arduino-build") / self.fqbn.replace(":", "-") / sketch_path.stem
+        compilation_command = [
+            "compile", "--warnings", "all",
+            "--fqbn", self.fqbn,
+            "--build-path", str(build_path),
+        ]
         if self.cli_compile_flags is not None:
             compilation_command.extend(self.cli_compile_flags)
         compilation_command.append(sketch_path)
 
-        if clean_build_cache:
-            for cache_path in pathlib.Path("/tmp").glob(pattern="arduino*"):
-                shutil.rmtree(path=cache_path)
         start_time = time.monotonic()
         compilation_data = self.run_arduino_cli_command(
             command=compilation_command, enable_output=self.RunCommandOutput.NONE, exit_on_failure=False
@@ -996,7 +1004,7 @@ class CompileSketches:
             # Compile the sketch again
             print("Compiling previous version of sketch to determine memory usage change")
             previous_compilation_result = self.compile_sketch(
-                sketch_path=compilation_result.sketch, clean_build_cache=self.enable_warnings_report
+                sketch_path=compilation_result.sketch
             )
 
             # git checkout the head ref to return the repository to its previous state

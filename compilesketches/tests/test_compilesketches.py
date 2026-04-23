@@ -417,7 +417,7 @@ def test_get_parent_commit_ref(mocker):
 
 
 @pytest.mark.parametrize("always_succeed", ["true", "false"])
-@pytest.mark.parametrize("enable_warnings_report, expected_clean_build_cache", [("true", True), ("false", False)])
+@pytest.mark.parametrize("enable_warnings_report", ["true", "false"])
 @pytest.mark.parametrize(
     "compilation_success_list, expected_success",
     [
@@ -431,15 +431,25 @@ def test_compile_sketches(
     mocker,
     always_succeed,
     enable_warnings_report,
-    expected_clean_build_cache,
     compilation_success_list,
     expected_success,
 ):
     sketch_list = [unittest.mock.sentinel.sketch1, unittest.mock.sentinel.sketch2, unittest.mock.sentinel.sketch3]
 
-    compilation_result_list = []
-    for success in compilation_success_list:
-        compilation_result_list.append(type("CompilationResult", (), {"success": success}))
+    # Build a per-sketch compilation result map so we can assert the correct result is
+    # passed to get_sketch_report regardless of the parallel execution order.
+    sketch_to_result = {
+        sketch: type("CompilationResult", (), {"success": success})
+        for sketch, success in zip(sketch_list, compilation_success_list)
+    }
+    import threading
+
+    result_lock = threading.Lock()
+
+    def compile_sketch_side_effect(self_arg, sketch_path):
+        with result_lock:
+            return sketch_to_result[sketch_path]
+
     sketch_report = unittest.mock.sentinel.sketch_report
     sketches_report = unittest.mock.sentinel.sketch_report_from_sketches_report
 
@@ -452,7 +462,11 @@ def test_compile_sketches(
     mocker.patch("compilesketches.CompileSketches.install_platforms", autospec=True)
     mocker.patch("compilesketches.CompileSketches.install_libraries", autospec=True)
     mocker.patch("compilesketches.CompileSketches.find_sketches", autospec=True, return_value=sketch_list)
-    mocker.patch("compilesketches.CompileSketches.compile_sketch", autospec=True, side_effect=compilation_result_list)
+    mocker.patch(
+        "compilesketches.CompileSketches.compile_sketch",
+        autospec=True,
+        side_effect=compile_sketch_side_effect,
+    )
     mocker.patch("compilesketches.CompileSketches.get_sketch_report", autospec=True, return_value=sketch_report)
     mocker.patch("compilesketches.CompileSketches.get_sketches_report", autospec=True, return_value=sketches_report)
     mocker.patch("compilesketches.CompileSketches.create_sketches_report_file", autospec=True)
@@ -468,16 +482,15 @@ def test_compile_sketches(
     compile_sketches.install_libraries.assert_called_once()
     compile_sketches.find_sketches.assert_called_once()
 
-    compile_sketch_calls = []
-    get_sketch_report_calls = []
-    sketch_report_list = []
-    for sketch, compilation_result in zip(sketch_list, compilation_result_list):
-        compile_sketch_calls.append(
-            unittest.mock.call(compile_sketches, sketch_path=sketch, clean_build_cache=expected_clean_build_cache)
-        )
-        get_sketch_report_calls.append(unittest.mock.call(compile_sketches, compilation_result=compilation_result))
-        sketch_report_list.append(sketch_report)
-    compile_sketches.compile_sketch.assert_has_calls(calls=compile_sketch_calls)
+    compile_sketch_calls = [unittest.mock.call(compile_sketches, sketch_path=sketch) for sketch in sketch_list]
+    get_sketch_report_calls = [
+        unittest.mock.call(compile_sketches, compilation_result=sketch_to_result[sketch]) for sketch in sketch_list
+    ]
+    sketch_report_list = [sketch_report] * len(sketch_list)
+
+    # compile_sketch is called in parallel — order is non-deterministic
+    compile_sketches.compile_sketch.assert_has_calls(calls=compile_sketch_calls, any_order=True)
+    # get_sketch_report is serial (post-parallel) — order is deterministic
     compile_sketches.get_sketch_report.assert_has_calls(calls=get_sketch_report_calls)
 
     compile_sketches.get_sketches_report.assert_called_once_with(
@@ -1575,13 +1588,13 @@ def test_path_is_sketch():
     assert compilesketches.path_is_sketch(path=test_data_path.joinpath("NoSketches", "NotSketch")) is False
 
 
-@pytest.mark.parametrize("clean_build_cache", [True, False])
 @pytest.mark.parametrize("returncode, expected_success", [(1, False), (0, True)])
-def test_compile_sketch(capsys, mocker, clean_build_cache, returncode, expected_success):
+def test_compile_sketch(capsys, mocker, returncode, expected_success):
     stdout = unittest.mock.sentinel.stdout
     sketch_path = pathlib.Path("FooSketch", "FooSketch.ino").resolve()
 
-    build_cache_paths = [unittest.mock.sentinel.build_cache_paths1, unittest.mock.sentinel.build_cache_paths2]
+    fqbn = "foo"  # default fqbn from get_compilesketches_object (first token of "foo fqbn_arg")
+    expected_build_path = pathlib.Path("/tmp/arduino-build") / fqbn / sketch_path.stem
 
     # Stub
     class CompilationData:
@@ -1590,23 +1603,25 @@ def test_compile_sketch(capsys, mocker, clean_build_cache, returncode, expected_
     CompilationData.returncode = returncode
     CompilationData.stdout = stdout
 
-    compile_sketches = get_compilesketches_object()
+    compile_sketches = get_compilesketches_object(cli_compile_flags="")
 
     mocker.patch(
         "compilesketches.CompileSketches.run_arduino_cli_command", autospec=True, return_value=CompilationData()
     )
-    mocker.patch.object(pathlib.Path, "glob", autospec=True, return_value=build_cache_paths)
-    mocker.patch("shutil.rmtree", autospec=True)
 
-    compilation_result = compile_sketches.compile_sketch(sketch_path=sketch_path, clean_build_cache=clean_build_cache)
+    compilation_result = compile_sketches.compile_sketch(sketch_path=sketch_path)
 
-    if clean_build_cache:
-        rmtree_calls = []
-        for build_cache_path in build_cache_paths:
-            rmtree_calls.append(unittest.mock.call(path=build_cache_path))
-
-        # noinspection PyUnresolvedReferences
-        shutil.rmtree.assert_has_calls(calls=rmtree_calls)
+    compile_sketches.run_arduino_cli_command.assert_called_once_with(
+        compile_sketches,
+        command=[
+            "compile", "--warnings", "all",
+            "--fqbn", fqbn,
+            "--build-path", str(expected_build_path),
+            sketch_path,
+        ],
+        enable_output=compilesketches.CompileSketches.RunCommandOutput.NONE,
+        exit_on_failure=False,
+    )
 
     expected_stdout = (
         "::group::Compiling sketch: "
@@ -1705,7 +1720,6 @@ def test_get_sketch_report(mocker, enable_warnings_report, do_deltas_report):
         compile_sketches.compile_sketch.assert_called_once_with(
             compile_sketches,
             sketch_path=compilation_result.sketch,
-            clean_build_cache=(enable_warnings_report == "true"),
         )
         Repo.checkout.assert_called_once_with(original_git_ref, recurse_submodules=True)
         get_sizes_from_output_calls.append(
