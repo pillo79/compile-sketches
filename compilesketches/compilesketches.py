@@ -260,6 +260,8 @@ class CompileSketches:
         self.verbose_print("Installing Arduino CLI version", self.cli_version)
         arduino_cli_archive_download_url_prefix = "https://downloads.arduino.cc/arduino-cli/"
         arduino_cli_archive_file_name = "arduino-cli_" + self.cli_version + "_Linux_64bit.tar.gz"
+        if "nightly" in self.cli_version:
+            arduino_cli_archive_download_url_prefix += "nightly/"
 
         self.install_from_download(
             url=arduino_cli_archive_download_url_prefix + arduino_cli_archive_file_name,
