@@ -1135,8 +1135,9 @@ class CompileSketches:
         issues = []
         compiler_issue_regex = re.compile("(:[0-9]+:[0-9]+|^\\S+): (fatal )?(warning|error):")
         linker_issue_regex = re.compile(": undefined reference to")
+        cli_issue_regex = re.compile("^Error .*: ")
         for line in compilation_result.output.splitlines():
-            if compiler_issue_regex.search(line) or linker_issue_regex.search(line):
+            if compiler_issue_regex.search(line) or linker_issue_regex.search(line) or cli_issue_regex.search(line):
                 issues.append(line)
 
         return issues
